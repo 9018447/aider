@@ -25,6 +25,7 @@ class ArchitectCoder(AskCoder):
         kwargs["main_model"] = editor_model
         kwargs["edit_format"] = self.main_model.editor_edit_format
         kwargs["suggest_shell_commands"] = False
+        kwargs["auto_tools"] = False
         kwargs["map_tokens"] = 0
         kwargs["total_cost"] = self.total_cost
         kwargs["cache_prompts"] = False

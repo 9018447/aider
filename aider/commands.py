@@ -21,6 +21,7 @@ from aider.io import CommandCompletionException
 from aider.llm import litellm
 from aider.repo import ANY_GIT_ERROR
 from aider.run_cmd import run_cmd
+from aider.tools_config import load_tools_config
 from aider.scrape import Scraper, install_playwright
 from aider.utils import is_image_file
 
@@ -1060,6 +1061,33 @@ class Commands:
     def cmd_quit(self, args):
         "Exit the application"
         self.cmd_exit(args)
+
+    def cmd_tool(self, args):
+        """Invoke a configured tool by name (parsed via .aider/tools.json)"""
+        parts = args.strip().split(None, 1)
+        if not parts:
+            self.io.tool_error("Usage: /tool <name> [args...]")
+            return
+        tool_name = parts[0]
+        tool_args = parts[1] if len(parts) > 1 else ""
+
+        config = load_tools_config()
+        if not config or tool_name not in config.get("tools", {}):
+            self.io.tool_error(f"Unknown tool: {tool_name}")
+            return
+
+        tool = config["tools"][tool_name]
+        if not tool.get("enabled", True):
+            self.io.tool_error(f"Tool disabled: {tool_name}")
+            return
+
+        # 构造完整命令：invoke 基础命令 + 用户参数
+        command = tool["invoke"]
+        if tool_args:
+            command += f" {tool_args}"
+
+        # 复用 cmd_run 逻辑（auto_tools 模式下无确认）
+        return self.cmd_run(command, add_on_nonzero_exit=self.coder.auto_tools)
 
     def cmd_ls(self, args):
         "List all known files and indicate which are included in the chat session"

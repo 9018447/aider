@@ -38,6 +38,7 @@ from aider.versioncheck import check_version, install_from_main_branch, install_
 from aider.watch import FileWatcher
 
 from .dump import dump  # noqa: F401
+from aider.tools_config import load_tools_config, get_tools_summary
 
 
 def check_config_files_for_yes(config_files):
@@ -742,6 +743,26 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         if args.gitignore:
             check_gitignore(git_root, io)
 
+    # 自动检测 AGENTS.md 并加入只读文件列表
+    if git_root:
+        agents_candidates = [Path(git_root) / "AGENTS.md", Path.home() / ".aider" / "AGENTS.md"]
+    else:
+        agents_candidates = [Path.home() / ".aider" / "AGENTS.md"]
+    for agents_path in agents_candidates:
+        if agents_path and agents_path.is_file():
+            resolved = str(agents_path.resolve())
+            if resolved not in read_only_fnames:
+                read_only_fnames.append(resolved)
+                io.tool_output(f"Auto-loaded AGENTS.md from {agents_path} (read-only).")
+            break  # 项目级优先，找到一个就停
+
+    # 加载工具配置
+    tools_config = load_tools_config()
+    if tools_config:
+        summary = get_tools_summary(tools_config)
+        if summary:
+            io.tool_output(f"Tools configured:\n{summary}")
+
     if args.verbose:
         show = format_settings(parser, args)
         io.tool_output(show)
@@ -982,6 +1003,8 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
             dirty_commits=args.dirty_commits,
             dry_run=args.dry_run,
             map_tokens=map_tokens,
+            auto_tools=args.auto_tools,
+            max_reflections=args.max_reflections,
             verbose=args.verbose,
             stream=args.stream,
             use_git=args.git,

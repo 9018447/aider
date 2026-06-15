@@ -55,6 +55,8 @@ Do not edit these files!
     shell_cmd_reminder = ""
     no_shell_cmd_prompt = ""
     no_shell_cmd_reminder = ""
+    tool_cmd_prompt = ""
+    tool_cmd_reminder = ""
 
     rename_with_shell = ""
     go_ahead_tip = ""

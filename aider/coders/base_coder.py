@@ -98,7 +98,7 @@ class Coder:
     num_malformed_responses = 0
     last_keyboard_interrupt = None
     num_reflections = 0
-    max_reflections = 3
+    auto_tools = False
     edit_format = None
     yield_stream = False
     temperature = None
@@ -338,6 +338,8 @@ class Coder:
         file_watcher=None,
         auto_copy_context=False,
         auto_accept_architect=True,
+        auto_tools=True,
+        max_reflections=50,
     ):
         # Fill in a dummy Analytics if needed, but it is never .enable()'d
         self.analytics = analytics if analytics is not None else Analytics()
@@ -362,6 +364,10 @@ class Coder:
             self.file_watcher.coder = self
 
         self.suggest_shell_commands = suggest_shell_commands
+        self.auto_tools = auto_tools
+        self.max_reflections = max_reflections
+        if self.auto_tools:
+            self.suggest_shell_commands = True
         self.detect_urls = detect_urls
 
         self.num_cache_warming_pings = num_cache_warming_pings
@@ -1184,7 +1190,11 @@ class Coder:
 
         platform_text = self.get_platform_info()
 
-        if self.suggest_shell_commands:
+        if self.auto_tools:
+            shell_cmd_prompt = self.gpt_prompts.tool_cmd_prompt.format(platform=platform_text)
+            shell_cmd_reminder = self.gpt_prompts.tool_cmd_reminder.format(platform=platform_text)
+            rename_with_shell = self.gpt_prompts.rename_with_shell
+        elif self.suggest_shell_commands:
             shell_cmd_prompt = self.gpt_prompts.shell_cmd_prompt.format(platform=platform_text)
             shell_cmd_reminder = self.gpt_prompts.shell_cmd_reminder.format(platform=platform_text)
             rename_with_shell = self.gpt_prompts.rename_with_shell
@@ -1608,6 +1618,10 @@ class Coder:
 
         shared_output = self.run_shell_commands()
         if shared_output:
+            if self.auto_tools:
+                # auto-tools 模式：输出回传给 LLM 继续推理
+                self.reflected_message = shared_output
+                return
             self.cur_messages += [
                 dict(role="user", content=shared_output),
                 dict(role="assistant", content="Ok"),
@@ -2431,14 +2445,52 @@ class Coder:
     def apply_edits_dry_run(self, edits):
         return edits
 
+    @staticmethod
+    def extract_bash_blocks(content):
+        """从 partial_response_content 中提取 bash 块内容。
+        作为 editblock_coder.get_edits() 的备选方案，供其他 coder 类型使用。
+        """
+        shell_starts = {
+            "```bash", "```sh", "```shell", "```cmd", "```batch",
+            "```powershell", "```ps1", "```zsh", "```fish",
+            "```ksh", "```csh", "```tcsh",
+        }
+        lines = content.splitlines(keepends=True)
+        commands = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if any(line.strip().startswith(start) for start in shell_starts):
+                i += 1
+                shell_content = []
+                while i < len(lines) and not lines[i].strip().startswith("```"):
+                    shell_content.append(lines[i])
+                    i += 1
+                if shell_content:
+                    commands.append("".join(shell_content))
+                if i < len(lines) and lines[i].strip().startswith("```"):
+                    i += 1
+                continue
+            i += 1
+        return commands
+
     def run_shell_commands(self):
         if not self.suggest_shell_commands:
             return ""
 
+        commands_to_run = self.shell_commands
+        if not commands_to_run:
+            # 如果 get_edits() 未提取 bash 块（非 editblock coder），
+            # 直接从 partial_response_content 中提取
+            commands_to_run = self.extract_bash_blocks(self.partial_response_content)
+
         done = set()
-        group = ConfirmGroup(set(self.shell_commands))
+        if commands_to_run:
+            group = ConfirmGroup(set(commands_to_run))
+        else:
+            group = None
         accumulated_output = ""
-        for command in self.shell_commands:
+        for command in commands_to_run:
             if command in done:
                 continue
             done.add(command)
@@ -2452,15 +2504,18 @@ class Coder:
         command_count = sum(
             1 for cmd in commands if cmd.strip() and not cmd.strip().startswith("#")
         )
-        prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
-        if not self.io.confirm_ask(
-            prompt,
-            subject="\n".join(commands),
-            explicit_yes_required=True,
-            group=group,
-            allow_never=True,
-        ):
-            return
+        if self.auto_tools:
+            pass  # auto-tools: skip confirmation, execute directly
+        else:
+            prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
+            if not self.io.confirm_ask(
+                prompt,
+                subject="\n".join(commands),
+                explicit_yes_required=True,
+                group=group,
+                allow_never=True,
+            ):
+                return
 
         accumulated_output = ""
         for command in commands:
@@ -2476,10 +2531,14 @@ class Coder:
             if output:
                 accumulated_output += f"Output from {command}\n{output}\n"
 
-        if accumulated_output.strip() and self.io.confirm_ask(
-            "Add command output to the chat?", allow_never=True
-        ):
-            num_lines = len(accumulated_output.strip().splitlines())
-            line_plural = "line" if num_lines == 1 else "lines"
-            self.io.tool_output(f"Added {num_lines} {line_plural} of output to the chat.")
-            return accumulated_output
+        if not accumulated_output.strip():
+            return
+
+        if not self.auto_tools:
+            if not self.io.confirm_ask("Add command output to the chat?", allow_never=True):
+                return
+
+        num_lines = len(accumulated_output.strip().splitlines())
+        line_plural = "line" if num_lines == 1 else "lines"
+        self.io.tool_output(f"Added {num_lines} {line_plural} of output to the chat.")
+        return accumulated_output

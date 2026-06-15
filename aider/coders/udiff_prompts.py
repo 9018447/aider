@@ -111,3 +111,5 @@ To make a new file, show a diff from `--- /dev/null` to `+++ path/to/new/file.ex
     shell_cmd_prompt = shell.shell_cmd_prompt
     no_shell_cmd_prompt = shell.no_shell_cmd_prompt
     shell_cmd_reminder = shell.shell_cmd_reminder
+    tool_cmd_prompt = shell.tool_cmd_prompt
+    tool_cmd_reminder = shell.tool_cmd_reminder

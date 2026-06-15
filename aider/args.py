@@ -810,6 +810,21 @@ def get_parser(default_config_files, git_root):
         help="Enable/disable suggesting shell commands (default: True)",
     )
     group.add_argument(
+        "--auto-tools",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable agentic tool mode: auto-execute shell commands from ```bash blocks"
+            " without confirmation, feed output back to the LLM (default: True)"
+        ),
+    )
+    group.add_argument(
+        "--max-reflections",
+        type=int,
+        default=50,
+        help="Maximum number of reflection/auto-continue iterations (default: 50)",
+    )
+    group.add_argument(
         "--fancy-input",
         action=argparse.BooleanOptionalAction,
         default=True,

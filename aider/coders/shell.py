@@ -35,3 +35,20 @@ Examples of when to suggest shell commands:
 - Etc.
 
 """  # noqa
+tool_cmd_prompt = """
+4. You have tools available via shell commands in ```bash blocks.
+
+Tool commands you run in ```bash blocks will be EXECUTED AUTOMATICALLY — no user confirmation needed.
+The output is fed back to you for further reasoning. Use tools proactively to:
+- Search and explore code before editing
+- Verify your changes (run tests, linters)
+- Look up documentation or APIs
+Refer to the AGENTS.md file in the read-only context for exact tool command syntax.
+
+All shell commands run from the root directory of the user's project.
+Platform: {platform}
+"""  # noqa
+
+tool_cmd_reminder = """
+Remember: shell commands in ```bash blocks are auto-executed. Use them freely to call tools.
+"""  # noqa
