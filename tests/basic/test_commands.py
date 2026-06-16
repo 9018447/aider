@@ -47,6 +47,83 @@ class TestCommands(TestCase):
         self.assertTrue(os.path.exists("foo.txt"))
         self.assertTrue(os.path.exists("bar.txt"))
 
+    @mock.patch.object(Coder, "ensure_leanctx_session", return_value=True)
+    @mock.patch("aider.coders.base_coder._run_cmd_quiet")
+    def test_cmd_add_auto_tools_uses_leanctx(self, mock_run_cmd, _mock_session):
+        io = InputOutput(pretty=False, fancy_input=False, yes=True)
+        from aider.coders import Coder
+
+        coder = Coder.create(self.GPT35, None, io)
+        commands = Commands(io, coder)
+
+        Path("foo.txt").write_text("hello world\n")
+        mock_run_cmd.return_value = (0, "hello world\n")
+
+        commands.cmd_add("foo.txt")
+        # lean-ctx should be invoked immediately during /add in auto_tools mode.
+        mock_run_cmd.assert_called_once()
+        self.assertIn("mcp2cli --session", mock_run_cmd.call_args[0][0])
+
+        coder.get_files_content()
+        # The cached lean-ctx result is reused; no extra tool call.
+        mock_run_cmd.assert_called_once()
+
+        abs_path = str(Path("foo.txt").resolve())
+        self.assertIn(abs_path, coder.abs_fnames)
+        self.assertNotIn(abs_path, coder.abs_fnames_native)
+
+    def test_cmd_add_native_bypasses_leanctx(self):
+        io = InputOutput(pretty=False, fancy_input=False, yes=True)
+        from aider.coders import Coder
+
+        coder = Coder.create(self.GPT35, None, io)
+        commands = Commands(io, coder)
+
+        Path("foo.txt").write_text("hello world\n")
+        commands.cmd_add("--native foo.txt")
+
+        abs_path = str(Path("foo.txt").resolve())
+        self.assertIn(abs_path, coder.abs_fnames)
+        self.assertIn(abs_path, coder.abs_fnames_native)
+
+    @mock.patch.object(Coder, "ensure_leanctx_session", return_value=True)
+    @mock.patch("aider.coders.base_coder._run_cmd_quiet")
+    def test_cmd_add_leanctx_failure_fallback(self, mock_run_cmd, _mock_session):
+        io = InputOutput(pretty=False, fancy_input=False, yes=True)
+        from aider.coders import Coder
+
+        coder = Coder.create(self.GPT35, None, io)
+        commands = Commands(io, coder)
+
+        Path("foo.txt").write_text("hello world\n")
+        mock_run_cmd.return_value = (1, "lean-ctx failed")
+
+        commands.cmd_add("foo.txt")
+
+        abs_path = str(Path("foo.txt").resolve())
+        self.assertIn(abs_path, coder.abs_fnames)
+        # get_files_content should fall back to native read when lean-ctx fails.
+        content = coder.get_files_content()
+        self.assertIn("hello world", content)
+
+    @mock.patch.object(Coder, "ensure_leanctx_session", return_value=True)
+    @mock.patch("aider.coders.base_coder._run_cmd_quiet")
+    def test_leanctx_read_is_cached(self, mock_run_cmd, _mock_session):
+        io = InputOutput(pretty=False, fancy_input=False, yes=True)
+        from aider.coders import Coder
+
+        coder = Coder.create(self.GPT35, None, io)
+        commands = Commands(io, coder)
+
+        Path("foo.txt").write_text("hello world\n")
+        mock_run_cmd.return_value = (0, "hello world\n")
+
+        commands.cmd_add("foo.txt")
+        coder.get_files_content()
+        coder.get_files_content()
+
+        mock_run_cmd.assert_called_once()
+
     def test_cmd_copy(self):
         # Initialize InputOutput and Coder instances
         io = InputOutput(pretty=False, fancy_input=False, yes=True)

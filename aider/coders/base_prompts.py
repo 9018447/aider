@@ -27,7 +27,7 @@ Do not improve, comment, fix or modify unrelated parts of the code in any way!
 Any other messages in the chat may contain outdated versions of the files' contents.
 """  # noqa: E501
 
-    files_content_assistant_reply = "Ok, any changes I propose will be to those files."
+    files_content_assistant_reply = "Yep, any changes I propose will be to those files."
 
     lean_files_prefix = """The following files are added to the chat as *editable*, and their contents have been read via the lean-ctx tool and are shown below.
 ONLY these files are actually loaded into the conversation. A file name appearing elsewhere in the chat is NOT automatically loaded.
@@ -42,7 +42,7 @@ Users can bypass lean-ctx for a specific file with `/add --native <file>`.
 Editable files:
 """  # noqa: E501
 
-    lean_files_assistant_reply = "Ok, the file contents have been read via lean-ctx and I will edit them directly."
+    lean_files_assistant_reply = "Yep, the file contents have been read via lean-ctx and I will edit them directly."
 
     context_mode_mentions_prefix = """The following files were mentioned in the conversation but are NOT automatically loaded.
 If you need their complete contents to proceed, read them with the lean-ctx tool in a ```bash block:
@@ -62,7 +62,7 @@ Don't include files that might contain relevant context, just files that will ne
 """  # noqa: E501
 
     files_no_full_files_with_repo_map_reply = (
-        "Ok, based on your requests I will suggest which files need to be edited and then"
+        "Yep, based on your requests I will suggest which files need to be edited and then"
         " stop and wait for your approval."
     )
 

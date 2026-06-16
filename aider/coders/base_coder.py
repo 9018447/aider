@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import atexit
 import base64
 import hashlib
 import json
@@ -9,6 +10,8 @@ import mimetypes
 import os
 import platform
 import re
+import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -83,6 +86,134 @@ all_fences = [
     wrap_fence("codeblock"),
     wrap_fence("sourcecode"),
 ]
+
+
+LEANCTX_LOG_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z\s+(INFO|WARN|WARNING|ERROR|DEBUG|TRACE)\s+"
+)
+LEANCTX_SESSION_PREFIX = "aider-leanctx"
+CTXMODE_SESSION_PREFIX = "aider-ctxmode"
+
+
+def _leanctx_session_name(root):
+    root_hash = hashlib.md5(root.encode("utf-8")).hexdigest()[:8]
+    return f"{LEANCTX_SESSION_PREFIX}-{root_hash}"
+
+
+def _contextmode_session_name(root):
+    root_hash = hashlib.md5(root.encode("utf-8")).hexdigest()[:8]
+    return f"{CTXMODE_SESSION_PREFIX}-{root_hash}"
+
+
+# Template for ctx-execute-file sandbox code used by read_file_with_contextmode().
+# __PATH__ and __QUERY__ are replaced before execution.
+_CONTEXTMODE_READ_CODE_TEMPLATE = r'''
+import ast, json, os, re
+
+PATH = __PATH__
+QUERY = __QUERY__
+
+lines = FILE_CONTENT.splitlines()
+line_count = len(lines)
+size = len(FILE_CONTENT.encode("utf-8"))
+ext = os.path.splitext(PATH)[1].lower()
+
+MAX_FULL_LINES = 300
+MAX_FULL_BYTES = 20480
+
+result = {"path": PATH, "lines": line_count, "size": size}
+
+if line_count <= MAX_FULL_LINES and size <= MAX_FULL_BYTES:
+    result["full"] = True
+    result["content"] = FILE_CONTENT
+else:
+    result["full"] = False
+
+    header = []
+    for line in lines:
+        if line.strip():
+            header.append(line)
+        if len(header) >= 30:
+            break
+    result["header"] = "\n".join(header)
+
+    imports = []
+    for line in lines[:200]:
+        stripped = line.strip()
+        if ext == ".py":
+            if stripped.startswith(("import ", "from ")):
+                imports.append(stripped)
+        else:
+            if re.match(r"^(#include|#import|import\s+\w+|from\s+\w+|using\s+\w+|require\s*\(|const\s+\w+\s+=\s+require|package\s+\w+)", stripped):
+                imports.append(stripped)
+        if len(imports) >= 50:
+            break
+    result["imports"] = imports
+
+    defs = []
+    if ext == ".py":
+        try:
+            tree = ast.parse(FILE_CONTENT)
+            for node in ast.iter_child_nodes(tree):
+                if isinstance(node, ast.ClassDef):
+                    defs.append(f"class {node.name}(...)  # line {node.lineno}")
+                elif isinstance(node, ast.FunctionDef):
+                    defs.append(f"def {node.name}(...)  # line {node.lineno}")
+                elif isinstance(node, ast.AsyncFunctionDef):
+                    defs.append(f"async def {node.name}(...)  # line {node.lineno}")
+        except Exception:
+            pass
+    else:
+        patterns = {
+            ".js": r"^(?:export\s+|default\s+|async\s+)?(?:class|function|const|let|var)\s+\w+",
+            ".jsx": r"^(?:export\s+|default\s+|async\s+)?(?:class|function|const|let|var)\s+\w+",
+            ".ts": r"^(?:export\s+|default\s+|async\s+)?(?:class|interface|function|const|let|var)\s+\w+",
+            ".tsx": r"^(?:export\s+|default\s+|async\s+)?(?:class|interface|function|const|let|var)\s+\w+",
+            ".go": r"^func\s+(?:\(\w+\s+[\w*]+\)\s+)?\w+",
+            ".rs": r"^(?:pub\s+)?(?:fn|struct|enum|trait|impl)\s+\w+",
+            ".java": r"^(?:public\s+|private\s+|protected\s+)?(?:class|interface|enum|record)\s+\w+",
+        }
+        pat = patterns.get(ext, r"^(?:class|def|function|fn|func)\s+\w+")
+        for i, line in enumerate(lines):
+            m = re.match(pat, line.strip())
+            if m:
+                defs.append(f"{m.group(0).strip()}  # line {i + 1}")
+            if len(defs) >= 100:
+                break
+    result["definitions"] = defs
+
+    matches = []
+    if QUERY:
+        terms = [w for w in set(re.findall(r"\b[a-zA-Z_]{3,}\b", QUERY.lower()))]
+        for i, line in enumerate(lines):
+            low = line.lower()
+            if any(t in low for t in terms):
+                matches.append(f"{i + 1:4d}: {line.rstrip()}")
+            if len(matches) >= 20:
+                break
+    result["matches"] = matches
+
+print("__AIDER_CTXMODE_START__")
+print(json.dumps(result, ensure_ascii=False))
+print("__AIDER_CTXMODE_END__")
+'''.strip()
+
+
+def _run_cmd_quiet(command, cwd=None):
+    """Run a shell command and capture stdout without printing to the terminal."""
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding=sys.stdout.encoding or "utf-8",
+            errors="replace",
+        )
+        return result.returncode, result.stdout
+    except Exception as e:
+        return 1, str(e)
 
 
 class Coder:
@@ -396,6 +527,8 @@ class Coder:
         self.verbose = verbose
         self.abs_fnames = set()
         self.abs_read_only_fnames = set()
+        self.abs_fnames_native = set()
+        self._leanctx_cache = {}
         self.add_gitignore_files = add_gitignore_files
 
         if cur_messages:
@@ -563,10 +696,241 @@ class Coder:
         self.abs_fnames.add(self.abs_root_path(rel_fname))
         self.check_added_files()
 
+    _leanctx_active_sessions = set()
+    _contextmode_active_sessions = set()
+    _mcp2cli_atexit_registered = False
+
+    def ensure_leanctx_session(self):
+        """Ensure a persistent mcp2cli session for lean-ctx is running for this root."""
+        session_name = _leanctx_session_name(self.root)
+        if session_name in Coder._leanctx_active_sessions:
+            return True
+
+        try:
+            exit_status, output = _run_cmd_quiet("mcp2cli --session-list", cwd=self.root)
+            if exit_status == 0 and session_name in (output or ""):
+                Coder._leanctx_active_sessions.add(session_name)
+                return True
+        except Exception:
+            pass
+
+        try:
+            exit_status, output = _run_cmd_quiet(
+                f'mcp2cli --session-start {session_name} --mcp-stdio "lean-ctx"',
+                cwd=self.root,
+            )
+            if exit_status == 0:
+                Coder._leanctx_active_sessions.add(session_name)
+                Coder._ensure_mcp2cli_atexit()
+                return True
+            return False
+        except Exception:
+            return False
+
+    @classmethod
+    def _ensure_mcp2cli_atexit(cls):
+        if not cls._mcp2cli_atexit_registered:
+            atexit.register(cls.stop_all_mcp2cli_sessions)
+            cls._mcp2cli_atexit_registered = True
+
+    def stop_leanctx_session(self):
+        """Stop the persistent lean-ctx mcp2cli session for this root."""
+        session_name = _leanctx_session_name(self.root)
+        self._stop_leanctx_session_by_name(session_name)
+
+    @classmethod
+    def _stop_leanctx_session_by_name(cls, session_name):
+        try:
+            _run_cmd_quiet(f"mcp2cli --session-stop {session_name}")
+        except Exception:
+            pass
+        cls._leanctx_active_sessions.discard(session_name)
+
+    @classmethod
+    def stop_all_leanctx_sessions(cls):
+        """Stop all persistent lean-ctx mcp2cli sessions started by this process."""
+        for session_name in list(cls._leanctx_active_sessions):
+            cls._stop_leanctx_session_by_name(session_name)
+
+    def ensure_contextmode_session(self):
+        """Ensure a persistent mcp2cli session for context-mode is running for this root."""
+        session_name = _contextmode_session_name(self.root)
+        if session_name in Coder._contextmode_active_sessions:
+            return True
+
+        try:
+            exit_status, output = _run_cmd_quiet("mcp2cli --session-list", cwd=self.root)
+            if exit_status == 0 and session_name in (output or ""):
+                Coder._contextmode_active_sessions.add(session_name)
+                return True
+        except Exception:
+            pass
+
+        try:
+            exit_status, output = _run_cmd_quiet(
+                f'mcp2cli --session-start {session_name} --mcp-stdio "context-mode"',
+                cwd=self.root,
+            )
+            if exit_status == 0:
+                Coder._contextmode_active_sessions.add(session_name)
+                Coder._ensure_mcp2cli_atexit()
+                return True
+            return False
+        except Exception:
+            return False
+
+    def stop_contextmode_session(self):
+        """Stop the persistent context-mode mcp2cli session for this root."""
+        session_name = _contextmode_session_name(self.root)
+        self._stop_contextmode_session_by_name(session_name)
+
+    @classmethod
+    def _stop_contextmode_session_by_name(cls, session_name):
+        try:
+            _run_cmd_quiet(f"mcp2cli --session-stop {session_name}")
+        except Exception:
+            pass
+        cls._contextmode_active_sessions.discard(session_name)
+
+    @classmethod
+    def stop_all_contextmode_sessions(cls):
+        """Stop all persistent context-mode mcp2cli sessions started by this process."""
+        for session_name in list(cls._contextmode_active_sessions):
+            cls._stop_contextmode_session_by_name(session_name)
+
+    @classmethod
+    def stop_all_mcp2cli_sessions(cls):
+        """Stop all persistent mcp2cli sessions started by this process."""
+        cls.stop_all_leanctx_sessions()
+        cls.stop_all_contextmode_sessions()
+
+    def read_file_with_leanctx(self, abs_path):
+        """Read a file via the persistent lean-ctx mcp2cli session.
+
+        Results are cached per file until the file's mtime changes or it is edited.
+        """
+        try:
+            mtime = os.path.getmtime(abs_path)
+        except OSError as e:
+            return None, f"unable to stat file: {e}"
+
+        cached = self._leanctx_cache.get(abs_path)
+        if cached and cached[0] == mtime:
+            return cached[1], None
+
+        session_ok = self.ensure_leanctx_session()
+        if not session_ok:
+            return None, "failed to start lean-ctx session"
+
+        session_name = _leanctx_session_name(self.root)
+        cmd = f"mcp2cli --session {session_name} ctx-read --path {abs_path} --mode raw"
+        try:
+            exit_status, output = _run_cmd_quiet(cmd, cwd=self.root)
+        except Exception as e:
+            return None, f"lean-ctx read failed: {e}"
+
+        if exit_status != 0:
+            return None, f"lean-ctx read exited with status {exit_status}"
+
+        if output is None:
+            return None, "lean-ctx read produced no output"
+
+        lines = [line for line in output.splitlines() if not LEANCTX_LOG_RE.match(line)]
+        content = "\n".join(lines)
+        # Strip the optional AUTO CONTEXT block that lean-ctx may prepend in session mode.
+        if "--- AUTO CONTEXT ---" in content and "--- END AUTO CONTEXT ---" in content:
+            parts = content.split("--- END AUTO CONTEXT ---", 1)
+            if len(parts) == 2:
+                content = parts[1].lstrip("\n")
+        self._leanctx_cache[abs_path] = (mtime, content)
+        return content, None
+
+    def read_file_with_contextmode(self, abs_path, query=None):
+        """Return a compact summary of a file via the persistent context-mode session.
+
+        Falls back to a full lean-ctx read if context-mode is unavailable or fails.
+        """
+        session_ok = self.ensure_contextmode_session()
+        if not session_ok:
+            content, error = self.read_file_with_leanctx(abs_path)
+            if error:
+                return None, error
+            return self._format_contextmode_result(abs_path, content, full=True), None
+
+        session_name = _contextmode_session_name(self.root)
+        code = _CONTEXTMODE_READ_CODE_TEMPLATE.replace("__PATH__", json.dumps(abs_path))
+        code = code.replace("__QUERY__", json.dumps(query or ""))
+        cmd = (
+            f"mcp2cli --session {session_name} ctx-execute-file "
+            f"--path {abs_path} --language python --code {shlex.quote(code)}"
+        )
+
+        try:
+            exit_status, output = _run_cmd_quiet(cmd, cwd=self.root)
+        except Exception as e:
+            content, error = self.read_file_with_leanctx(abs_path)
+            if error:
+                return None, f"context-mode read failed and lean-ctx fallback failed: {e}"
+            return self._format_contextmode_result(abs_path, content, full=True), None
+
+        if exit_status != 0:
+            content, error = self.read_file_with_leanctx(abs_path)
+            if error:
+                return None, f"context-mode read exited {exit_status}; lean-ctx fallback: {error}"
+            return self._format_contextmode_result(abs_path, content, full=True), None
+
+        match = re.search(
+            r"__AIDER_CTXMODE_START__\n(.*?)__AIDER_CTXMODE_END__", output, re.DOTALL
+        )
+        if not match:
+            content, error = self.read_file_with_leanctx(abs_path)
+            if error:
+                return None, "context-mode produced no parseable output and lean-ctx fallback failed"
+            return self._format_contextmode_result(abs_path, content, full=True), None
+
+        try:
+            result = json.loads(match.group(1))
+        except Exception:
+            content, error = self.read_file_with_leanctx(abs_path)
+            if error:
+                return None, "context-mode output was not valid JSON and lean-ctx fallback failed"
+            return self._format_contextmode_result(abs_path, content, full=True), None
+
+        if result.get("full"):
+            return (
+                self._format_contextmode_result(abs_path, result.get("content", ""), full=True),
+                None,
+            )
+        return self._format_contextmode_result(abs_path, result, full=False), None
+
+    def _format_contextmode_result(self, abs_path, data, full=False):
+        rel = self.get_rel_fname(abs_path)
+        if full:
+            return f"### {rel}\n```\n{data}\n```\n"
+
+        lines = [f"### {rel} ({data.get('lines', '?')} lines, {data.get('size', '?')} bytes)"]
+        if data.get("header"):
+            lines.append("**Header:**\n```\n" + data["header"] + "\n```")
+        if data.get("imports"):
+            lines.append(
+                "**Imports/includes:**\n```\n" + "\n".join(data["imports"][:50]) + "\n```"
+            )
+        if data.get("definitions"):
+            lines.append(
+                "**Definitions:**\n```\n" + "\n".join(data["definitions"][:100]) + "\n```"
+            )
+        if data.get("matches"):
+            lines.append(
+                "**Lines matching your request:**\n```\n" + "\n".join(data["matches"][:20]) + "\n```"
+            )
+        return "\n\n".join(lines) + "\n"
+
     def drop_rel_fname(self, fname):
         abs_fname = self.abs_root_path(fname)
         if abs_fname in self.abs_fnames:
             self.abs_fnames.remove(abs_fname)
+            self.abs_fnames_native.discard(abs_fname)
+            self._leanctx_cache.pop(abs_fname, None)
             return True
 
     def abs_root_path(self, path):
@@ -603,12 +967,20 @@ class Coder:
 
     def get_abs_fnames_content(self):
         for fname in list(self.abs_fnames):
-            content = self.io.read_text(fname)
+            if self.auto_tools and fname not in self.abs_fnames_native:
+                content, error = self.read_file_with_leanctx(fname)
+                if error:
+                    self.io.tool_error(f"lean-ctx read failed for {fname}: {error}")
+                    content = self.io.read_text(fname)
+            else:
+                content = self.io.read_text(fname)
 
             if content is None:
                 relative_fname = self.get_rel_fname(fname)
                 self.io.tool_warning(f"Dropping {relative_fname} from the chat.")
-                self.abs_fnames.remove(fname)
+                self.abs_fnames.discard(fname)
+                self.abs_fnames_native.discard(fname)
+                self._leanctx_cache.pop(fname, None)
             else:
                 yield fname, content
 
@@ -795,9 +1167,13 @@ class Coder:
     def get_chat_files_messages(self):
         chat_files_messages = []
         if self.abs_fnames:
-            files_content = self.gpt_prompts.files_content_prefix
-            files_content += self.get_files_content()
-            files_reply = self.gpt_prompts.files_content_assistant_reply
+            if self.auto_tools:
+                files_content = self.gpt_prompts.lean_files_prefix + self.get_files_content()
+                files_reply = self.gpt_prompts.lean_files_assistant_reply
+            else:
+                files_content = self.gpt_prompts.files_content_prefix
+                files_content += self.get_files_content()
+                files_reply = self.gpt_prompts.files_content_assistant_reply
         elif self.get_repo_map() and self.gpt_prompts.files_no_full_files_with_repo_map:
             files_content = self.gpt_prompts.files_no_full_files_with_repo_map
             files_reply = self.gpt_prompts.files_no_full_files_with_repo_map_reply
@@ -922,7 +1298,12 @@ class Coder:
         if self.commands.is_command(inp):
             return self.commands.run(inp)
 
-        self.check_for_file_mentions(inp)
+        add_rel_files_message = self.check_for_file_mentions(inp)
+        if add_rel_files_message:
+            if inp:
+                inp = f"{inp}\n\n{add_rel_files_message}"
+            else:
+                inp = add_rel_files_message
         inp = self.check_for_urls(inp)
 
         return inp
@@ -1780,6 +2161,12 @@ class Coder:
         if not new_mentions:
             return
 
+        if self.auto_tools:
+            # In auto-tools mode, do NOT auto-load files just because their names were
+            # mentioned. The LLM has shell tools to read files proactively. Auto-parsing
+            # every mention leads to stale context and read loops.
+            return
+
         added_fnames = []
         group = ConfirmGroup(new_mentions)
         for rel_fname in sorted(new_mentions):
@@ -2346,6 +2733,7 @@ class Coder:
                 self.io.tool_output(f"Did not apply edit to {path} (--dry-run)")
             else:
                 self.io.tool_output(f"Applied edit to {path}")
+            self._leanctx_cache.pop(path, None)
 
         return edited
 
@@ -2499,13 +2887,18 @@ class Coder:
                 accumulated_output += output + "\n\n"
         return accumulated_output
 
+    @staticmethod
+    def _is_full_read_command(command):
+        """Detect commands that read a full file (as opposed to context-mode analysis)."""
+        return "mcp2cli" in command and "ctx-read" in command
+
     def handle_shell_commands(self, commands_str, group):
         commands = commands_str.strip().splitlines()
         command_count = sum(
             1 for cmd in commands if cmd.strip() and not cmd.strip().startswith("#")
         )
         if self.auto_tools:
-            pass  # auto-tools: skip confirmation, execute directly
+            pass  # auto-tools: skip confirmation for most commands
         else:
             prompt = "Run shell command?" if command_count == 1 else "Run shell commands?"
             if not self.io.confirm_ask(
@@ -2522,6 +2915,19 @@ class Coder:
             command = command.strip()
             if not command or command.startswith("#"):
                 continue
+
+            # In auto-tools mode, full-file reads require explicit user approval,
+            # while context-mode analysis commands run automatically.
+            if self.auto_tools and self._is_full_read_command(command):
+                if not self.io.confirm_ask(
+                    "Allow full file read?",
+                    subject=command,
+                    explicit_yes_required=True,
+                    allow_never=True,
+                ):
+                    self.io.tool_output(f"Skipping full read: {command}")
+                    accumulated_output += f"Skipped full read: {command}\n"
+                    continue
 
             self.io.tool_output()
             self.io.tool_output(f"Running {command}")

@@ -119,6 +119,36 @@ class TestCoder(unittest.TestCase):
         self.assertIn("file1.txt", content)
         self.assertIn("file2.txt", content)
 
+
+    def test_get_chat_files_messages_lean(self):
+        """auto_tools=True → chat files message includes content read via lean-ctx."""
+        with GitTemporaryDirectory():
+            io = InputOutput(pretty=False, yes=True)
+            (Path("f.py")).write_text("BODY_SECRET = 1\n")
+            coder = Coder.create(
+                self.GPT35, "diff", io=io, fnames=["f.py"],
+                use_git=True, auto_tools=True
+            )
+            msgs = coder.get_chat_files_messages()
+            joined = "".join(m["content"] for m in msgs if m["role"] == "user")
+            self.assertIn("f.py", joined)
+            self.assertIn("lean-ctx", joined)
+            self.assertIn("BODY_SECRET", joined)  # body now read via lean-ctx
+            self.assertNotIn("AUTO CONTEXT", joined)
+
+    def test_get_chat_files_messages_full(self):
+        """auto_tools=False → traditional full content injected."""
+        with GitTemporaryDirectory():
+            io = InputOutput(pretty=False, yes=True)
+            (Path("f.py")).write_text("BODY_SECRET = 1\n")
+            coder = Coder.create(
+                self.GPT35, "diff", io=io, fnames=["f.py"],
+                use_git=True, auto_tools=False
+            )
+            msgs = coder.get_chat_files_messages()
+            joined = "".join(m["content"] for m in msgs if m["role"] == "user")
+            self.assertIn("BODY_SECRET", joined)
+
     def test_check_for_filename_mentions(self):
         with GitTemporaryDirectory():
             repo = git.Repo()
@@ -150,6 +180,38 @@ class TestCoder(unittest.TestCase):
             )
 
             self.assertEqual(coder.abs_fnames, expected_files)
+
+    @patch.object(Coder, "ensure_contextmode_session", return_value=True)
+    @patch.object(Coder, "read_file_with_contextmode", return_value=("summary", None))
+    def test_check_for_filename_mentions_auto_tools_does_not_auto_load(
+        self, mock_read, _mock_session
+    ):
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            mock_io = MagicMock()
+            mock_io.confirm_ask = MagicMock(return_value=True)
+
+            fname1 = Path("file1.txt")
+            fname2 = Path("file2.py")
+
+            fname1.write_text("one\n")
+            fname2.write_text("two\n")
+
+            repo.git.add(str(fname1))
+            repo.git.add(str(fname2))
+            repo.git.commit("-m", "new")
+
+            coder = Coder.create(self.GPT35, None, mock_io, auto_tools=True)
+
+            result = coder.check_for_file_mentions("Please check file1.txt and file2.py")
+
+            # In auto-tools mode, mentions are NOT auto-loaded or auto-read.
+            # The LLM must use shell tools to read files proactively.
+            self.assertEqual(coder.abs_fnames, set())
+            self.assertIsNone(result)
+            mock_io.confirm_ask.assert_not_called()
+            mock_read.assert_not_called()
 
     def test_check_for_ambiguous_filename_mentions_of_longer_paths(self):
         with GitTemporaryDirectory():
@@ -233,7 +295,7 @@ class TestCoder(unittest.TestCase):
     def test_check_for_file_mentions_with_mocked_confirm(self):
         with GitTemporaryDirectory():
             io = InputOutput(pretty=False)
-            coder = Coder.create(self.GPT35, None, io)
+            coder = Coder.create(self.GPT35, None, io, auto_tools=False)
 
             # Mock get_file_mentions to return two file names
             coder.get_file_mentions = MagicMock(return_value=set(["file1.txt", "file2.txt"]))

@@ -743,18 +743,15 @@ def main(argv=None, input=None, output=None, force_git_root=None, return_coder=F
         if args.gitignore:
             check_gitignore(git_root, io)
 
-    # 自动检测 AGENTS.md 并加入只读文件列表
-    if git_root:
-        agents_candidates = [Path(git_root) / "AGENTS.md", Path.home() / ".aider" / "AGENTS.md"]
-    else:
-        agents_candidates = [Path.home() / ".aider" / "AGENTS.md"]
-    for agents_path in agents_candidates:
-        if agents_path and agents_path.is_file():
-            resolved = str(agents_path.resolve())
+    # 加载 ~/.agents/skills/mcp2cl*/SKILL.md 作为只读工具规范
+    skills_dir = Path.home() / ".agents" / "skills"
+    for sub in sorted(skills_dir.glob("mcp2cl*")):
+        skills_path = sub / "SKILL.md"
+        if skills_path.is_file():
+            resolved = str(skills_path.resolve())
             if resolved not in read_only_fnames:
                 read_only_fnames.append(resolved)
-                io.tool_output(f"Auto-loaded AGENTS.md from {agents_path} (read-only).")
-            break  # 项目级优先，找到一个就停
+                io.tool_output(f"Auto-loaded SKILL.md from {skills_path} (read-only).")
 
     # 加载工具配置
     tools_config = load_tools_config()

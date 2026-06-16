@@ -85,6 +85,71 @@ class TestAutoToolsConfig(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIn("hello world", result)
 
+    def test_handle_shell_commands_full_read_requires_confirm(self):
+        """Full-file reads via lean-ctx require explicit approval even in auto_tools mode."""
+        coder = Coder.create(
+            self.GPT35,
+            "diff",
+            io=InputOutput(yes=True),
+            fnames=[],
+            use_git=False,
+            auto_tools=True,
+        )
+        coder.io.confirm_ask = MagicMock(return_value=True)
+
+        with patch("aider.coders.base_coder.run_cmd", return_value=(0, "file content")):
+            result = coder.handle_shell_commands(
+                "mcp2cli @leanctx ctx-read --path /tmp/foo.py --mode full", None
+            )
+
+        coder.io.confirm_ask.assert_called_once()
+        self.assertIsNotNone(result)
+        self.assertIn("file content", result)
+
+    def test_handle_shell_commands_full_read_denied(self):
+        """Denied full-file reads are skipped and run_cmd is not invoked."""
+        coder = Coder.create(
+            self.GPT35,
+            "diff",
+            io=InputOutput(yes=True),
+            fnames=[],
+            use_git=False,
+            auto_tools=True,
+        )
+        coder.io.confirm_ask = MagicMock(return_value=False)
+
+        with patch("aider.coders.base_coder.run_cmd") as mock_run_cmd:
+            result = coder.handle_shell_commands(
+                "mcp2cli @leanctx ctx-read --path /tmp/foo.py --mode full", None
+            )
+
+        coder.io.confirm_ask.assert_called_once()
+        mock_run_cmd.assert_not_called()
+        self.assertIsNotNone(result)
+        self.assertIn("Skipped full read", result)
+
+    def test_handle_shell_commands_contextmode_runs_without_confirm(self):
+        """context-mode analysis commands run automatically in auto_tools mode."""
+        coder = Coder.create(
+            self.GPT35,
+            "diff",
+            io=InputOutput(yes=True),
+            fnames=[],
+            use_git=False,
+            auto_tools=True,
+        )
+        coder.io.confirm_ask = MagicMock(return_value=True)
+
+        with patch("aider.coders.base_coder.run_cmd", return_value=(0, "summary")):
+            result = coder.handle_shell_commands(
+                "mcp2cli @context-mode ctx-execute-file --path /tmp/foo.py --language python --code 'print(len(FILE_CONTENT))'",
+                None,
+            )
+
+        coder.io.confirm_ask.assert_not_called()
+        self.assertIsNotNone(result)
+        self.assertIn("summary", result)
+
     def test_send_message_auto_tools_sets_reflected_message(self):
         """Verify auto_tools mode sets reflected_message instead of adding to cur_messages."""
         coder = Coder.create(
@@ -291,7 +356,23 @@ class TestToolsConfigLoading(unittest.TestCase):
         prompt = coder.fmt_system_prompt(coder.gpt_prompts.main_system)
         self.assertIn("EXECUTED AUTOMATICALLY", prompt)
         self.assertNotIn("Concisely suggest", prompt)
+        self.assertIn("SKILL.md", prompt)
 
+    def test_fmt_system_prompt_no_auto_tools(self):
+        """Verify non-auto-tools mode selects shell_cmd_prompt, not tool_cmd_prompt."""
+        coder = Coder.create(
+            Model("gpt-3.5-turbo"),
+            "diff",
+            io=InputOutput(yes=True),
+            fnames=[],
+            use_git=False,
+            auto_tools=False,
+        )
+
+        prompt = coder.fmt_system_prompt(coder.gpt_prompts.main_system)
+        self.assertIn("suggest any shell commands", prompt)
+        self.assertNotIn("EXECUTED AUTOMATICALLY", prompt)
+        self.assertNotIn("SKILL.md", prompt)
 
 if __name__ == "__main__":
     unittest.main()

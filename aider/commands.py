@@ -801,8 +801,16 @@ class Commands:
         "Add files to the chat so aider can edit them or review them in detail"
 
         all_matched_files = set()
+        use_native = False
 
-        filenames = parse_quoted_filenames(args)
+        # Detect and strip the --native switch so users can bypass lean-ctx reads.
+        words = parse_quoted_filenames(args)
+        filenames = []
+        for word in words:
+            if word == "--native":
+                use_native = True
+            else:
+                filenames.append(word)
         for word in filenames:
             if Path(word).is_absolute():
                 fname = Path(word)
@@ -868,40 +876,55 @@ class Commands:
             if abs_file_path in self.coder.abs_fnames:
                 self.io.tool_error(f"{matched_file} is already in the chat as an editable file")
                 continue
-            elif abs_file_path in self.coder.abs_read_only_fnames:
+
+            if is_image_file(matched_file) and not self.coder.main_model.info.get(
+                "supports_vision"
+            ):
+                self.io.tool_error(
+                    f"Cannot add image file {matched_file} as the"
+                    f" {self.coder.main_model.name} does not support images."
+                )
+                continue
+
+            if abs_file_path in self.coder.abs_read_only_fnames:
                 # Determine if file can be promoted to editable
                 if self.coder.repo:
                     can_edit = self.coder.repo.path_in_repo(matched_file)
                 else:
                     can_edit = abs_file_path.startswith(self.coder.root)
 
-                if can_edit:
-                    self.coder.abs_read_only_fnames.remove(abs_file_path)
-                    self.coder.abs_fnames.add(abs_file_path)
-                    self.io.tool_output(
-                        f"Moved {matched_file} from read-only to editable files in the chat"
-                    )
-                else:
+                if not can_edit:
                     self.io.tool_error(
                         f"Cannot add {matched_file} as it's not part of the repository"
                     )
-            else:
-                if is_image_file(matched_file) and not self.coder.main_model.info.get(
-                    "supports_vision"
-                ):
-                    self.io.tool_error(
-                        f"Cannot add image file {matched_file} as the"
-                        f" {self.coder.main_model.name} does not support images."
-                    )
                     continue
+                self.coder.abs_read_only_fnames.remove(abs_file_path)
+
+            # In auto-tools mode we read the file immediately via the persistent lean-ctx
+            # session, unless the user explicitly asked for the native reader with
+            # `/add --native`.
+            lean_ctx_mode = self.coder.auto_tools and not use_native
+            if lean_ctx_mode:
+                content, error = self.coder.read_file_with_leanctx(abs_file_path)
+                if error:
+                    self.io.tool_warning(
+                        f"lean-ctx read failed for {matched_file}: {error}; will retry later"
+                    )
+                self.coder.abs_fnames.add(abs_file_path)
+                fname = self.coder.get_rel_fname(abs_file_path)
+                self.io.tool_output(f"Added {fname} to the chat (will read via lean-ctx)")
+                self.coder.check_added_files()
+            else:
                 content = self.io.read_text(abs_file_path)
                 if content is None:
                     self.io.tool_error(f"Unable to read {matched_file}")
-                else:
-                    self.coder.abs_fnames.add(abs_file_path)
-                    fname = self.coder.get_rel_fname(abs_file_path)
-                    self.io.tool_output(f"Added {fname} to the chat")
-                    self.coder.check_added_files()
+                    continue
+                self.coder.abs_fnames.add(abs_file_path)
+                if use_native:
+                    self.coder.abs_fnames_native.add(abs_file_path)
+                fname = self.coder.get_rel_fname(abs_file_path)
+                self.io.tool_output(f"Added {fname} to the chat")
+                self.coder.check_added_files()
 
     def completions_drop(self):
         files = self.coder.get_inchat_relative_files()
