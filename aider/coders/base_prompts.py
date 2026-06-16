@@ -29,6 +29,30 @@ Any other messages in the chat may contain outdated versions of the files' conte
 
     files_content_assistant_reply = "Ok, any changes I propose will be to those files."
 
+    lean_files_prefix = """The following files are added to the chat as *editable*, and their contents have been read via the lean-ctx tool and are shown below.
+ONLY these files are actually loaded into the conversation. A file name appearing elsewhere in the chat is NOT automatically loaded.
+You do NOT need to call ctx-read again for the files listed below; produce SEARCH/REPLACE edits directly based on the returned contents.
+If you need to inspect a file that is NOT listed below, use the lean-ctx tool in a ```bash block:
+  mcp2cli @leanctx ctx-read --path <ABSOLUTE_PATH> --mode full
+For analysis without loading a file (counts, structure, aggregation), run instead:
+  mcp2cli @context-mode ctx-execute-file --path <PATH> --language javascript --code "<code>"
+See SKILL.md (read-only) for full tool command syntax.
+Users can bypass lean-ctx for a specific file with `/add --native <file>`.
+
+Editable files:
+"""  # noqa: E501
+
+    lean_files_assistant_reply = "Ok, the file contents have been read via lean-ctx and I will edit them directly."
+
+    context_mode_mentions_prefix = """The following files were mentioned in the conversation but are NOT automatically loaded.
+If you need their complete contents to proceed, read them with the lean-ctx tool in a ```bash block:
+  mcp2cli @leanctx ctx-read --path <ABSOLUTE_PATH> --mode full
+To analyze without loading, use:
+  mcp2cli @context-mode ctx-execute-file --path <PATH> --language javascript --code "<code>"
+
+Mentioned files:
+"""  # noqa: E501
+
     files_no_full_files = "I am not sharing any files that you can edit yet."
 
     files_no_full_files_with_repo_map = """Don't try and edit any existing code without asking me to add the files to the chat!
